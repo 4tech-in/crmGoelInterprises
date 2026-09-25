@@ -31,25 +31,36 @@ interface CreateEmployeeIdBody {
 //   return `${prefix}-${String(nextNumber).padStart(3, "0")}`;
 // };
 
+const escapeRegExp = (value: string) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 export const generateEmployeeId = async (prefix: string) => {
+  const normalizedPrefix = prefix.trim();
+  const employeeIdPattern = new RegExp(
+    `^${escapeRegExp(normalizedPrefix)}-(\\d+)$`
+  );
+
   const employees = await EmployeeId.find({
-    employeeId: new RegExp(`^${prefix}-`)
+    employeeId: employeeIdPattern
   }).select("employeeId");
 
-  let maxNumber = 0;
+  const usedNumbers = new Set<number>();
 
   for (const emp of employees) {
-    const parts = emp.employeeId.split("-");
-    const number = parseInt(parts[1] || "0", 10);
+    const match = emp.employeeId.match(employeeIdPattern);
+    const number = Number(match?.[1] ?? 0);
 
-    if (number > maxNumber) {
-      maxNumber = number;
+    if (Number.isInteger(number) && number > 0) {
+      usedNumbers.add(number);
     }
   }
 
-  const nextNumber = maxNumber + 1;
+  let nextNumber = 1;
+  while (usedNumbers.has(nextNumber)) {
+    nextNumber++;
+  }
 
-  return `${prefix}-${String(nextNumber).padStart(3, "0")}`;
+  return `${normalizedPrefix}-${String(nextNumber).padStart(3, "0")}`;
 };
 
 
@@ -60,19 +71,34 @@ export const createEmployeeId = async (c: Context) => {
     const body = await c.req.json<CreateEmployeeIdBody>();
     const { prefix, remark } = body;
 
-    if (!prefix) {
+    if (!prefix?.trim()) {
       return c.json({ message: "Prefix required" }, 400);
     }
 
-    const employeeId = await generateEmployeeId(prefix);
+    const normalizedPrefix = prefix.trim();
 
-    const data = await EmployeeId.create({
-      employeeId,
-      prefix,
-      remark,
-    });
+    // Retry if two requests generate the same ID at the same time. The unique
+    // MongoDB index remains the final guarantee that IDs cannot be duplicated.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const employeeId = await generateEmployeeId(normalizedPrefix);
 
-    return c.json(data, 201);
+      try {
+        const data = await EmployeeId.create({
+          employeeId,
+          prefix: normalizedPrefix,
+          remark,
+        });
+
+        return c.json(data, 201);
+      } catch (error: any) {
+        if (error?.code !== 11000) throw error;
+      }
+    }
+
+    return c.json(
+      { message: "Could not generate a unique Employee ID. Please retry." },
+      409
+    );
   } catch (error: any) {
     return c.json(
       { message: error.message || "Internal Server Error" },
