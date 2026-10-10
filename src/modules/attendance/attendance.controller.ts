@@ -222,6 +222,29 @@ export const uploadBiometricData = async (c: Context) => {
       }),
     );
 
+    // ===== FETCH MANUAL ATTENDANCES TO PREVENT OVERWRITE =====
+    const userIdsArray = Array.from(userMap.values());
+    const manualAttendances = await Attendance.find({
+      userId: { $in: userIdsArray },
+      date: { $gte: startDate, $lte: endDate },
+      isManual: true
+    }).select("userId date");
+
+    const manualSet = new Set(
+      manualAttendances.map(a => {
+        const d = new Date(a.date);
+        return (
+          a.userId.toString() +
+          "_" +
+          d.getFullYear() +
+          "-" +
+          String(d.getMonth() + 1).padStart(2, "0") +
+          "-" +
+          String(d.getDate()).padStart(2, "0")
+        );
+      })
+    );
+
     // ===== PROCESS ATTENDANCE =====
     const ops: any[] = [];
 
@@ -242,6 +265,10 @@ export const uploadBiometricData = async (c: Context) => {
         .map(Number);
 
       for (const [dateKey, punches] of datesObj.entries()) {
+        if (manualSet.has(`${userId.toString()}_${dateKey}`)) {
+          continue; // Skip processing this date as it was manually marked
+        }
+
         punches.sort((a, b) => a.getTime() - b.getTime());
 
         let punchIn = punches.length > 0 ? punches[0] : null;
@@ -263,8 +290,14 @@ export const uploadBiometricData = async (c: Context) => {
           shiftInHours >= 5 &&
           shiftInHours <= 12
         ) {
-          punchOut = punches[0];
-          punchIn = null;
+          const firstPunch = punches[0];
+          if (firstPunch) {
+            const punchHour = firstPunch.getHours();
+            if (punchHour >= 12) {
+              punchOut = firstPunch;
+              punchIn = null;
+            }
+          }
         }
 
         // ✅ 24 HOUR SHIFT LOGIC
