@@ -1627,21 +1627,12 @@ export const getTodayAttendanceSummary = async (c: Context) => {
   try {
     const { startDate, endDate } = c.req.query();
 
-    // ===== DEFAULT DATE RANGE (TODAY) =====
-    let start = new Date();
+    // ===== DATE RANGE =====
+    let start = startDate ? new Date(startDate) : new Date();
     start.setHours(0, 0, 0, 0);
 
-    let end = new Date(start);
-    end.setDate(start.getDate() + 1);
-
-    // ===== IF QUERY PARAMS PROVIDED =====
-    if (startDate && endDate) {
-      start = new Date(startDate);
-      start.setHours(0, 0, 0, 0);
-
-      end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-    }
+    let end = endDate ? new Date(endDate) : new Date(start);
+    end.setHours(23, 59, 59, 999);
 
     // ===== USER FILTER =====
     const userFilter: any = {
@@ -1690,13 +1681,15 @@ export const getTodayAttendanceSummary = async (c: Context) => {
         const hasPunchIn = !!attendance.punchIn;
         const hasPunchOut = !!attendance.punchOut;
 
-        if (attendance.status === "Absent") {
+        if (attendance.status === "Absent" && !hasPunchIn && !hasPunchOut) {
           absent++;
         } else if (
           attendance.status === "WeeklyOff" ||
           attendance.status === "Holiday"
         ) {
           // Do not count in present/absent/onLeave/notMarked
+        } else if (!hasPunchIn || !hasPunchOut) {
+          notMarked++;
         } else if (
           attendance.status === "Present" ||
           (hasPunchIn && hasPunchOut)
