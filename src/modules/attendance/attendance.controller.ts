@@ -333,12 +333,12 @@ export const uploadBiometricData = async (c: Context) => {
         let overtimeHours = 0;
         let overtimePay = 0;
 
-        // const requiredMinutes = 8 * 60;
-        const shiftInDate = new Date(dateKey);
-        shiftInDate.setHours(shiftInHours, shiftInMinutes, 0, 0);
-
-        const shiftOutDate = new Date(dateKey);
-        shiftOutDate.setHours(shiftOutHours, shiftOutMinutes, 0, 0);
+        const [yearStr, monthStr, dayStr] = dateKey.split("-");
+        const year = Number(yearStr) || 1970;
+        const month = Number(monthStr) || 1;
+        const day = Number(dayStr) || 1;
+        const shiftInDate = new Date(year, month - 1, day, shiftInHours, shiftInMinutes, 0, 0);
+        const shiftOutDate = new Date(year, month - 1, day, shiftOutHours, shiftOutMinutes, 0, 0);
 
         if (shiftOutDate <= shiftInDate) {
           shiftOutDate.setDate(shiftOutDate.getDate() + 1);
@@ -347,30 +347,91 @@ export const uploadBiometricData = async (c: Context) => {
         const requiredMinutes =
           (shiftOutDate.getTime() - shiftInDate.getTime()) / 60000;
         const bufferMins = policy.attendanceBufferMins || 0;
+        const otThresholdMins =
+          policy.overtimeThresholdMins !== undefined &&
+          policy.overtimeThresholdMins !== null
+            ? policy.overtimeThresholdMins
+            : 30;
 
         if (punchIn && punchOut) {
-          totalWorkedMinutes = (punchOut.getTime() - punchIn.getTime()) / 60000;
+          const isHoliday = holidaySet.has(dateKey);
 
-          if (totalWorkedMinutes >= requiredMinutes - bufferMins) {
+          if (isHoliday) {
+            totalWorkedMinutes = Math.round(
+              (punchOut.getTime() - punchIn.getTime()) / 60000
+            );
+            if (totalWorkedMinutes < 0) totalWorkedMinutes = 0;
+            overtimeHours = Number((totalWorkedMinutes / 60).toFixed(2));
+            overtimePay = Number(
+              (overtimeHours * (policy.overtimeHourlyRate || 0)).toFixed(2)
+            );
             status = "Present";
-
-            const isHoliday = holidaySet.has(dateKey);
-
-            if (isHoliday) {
-              overtimeHours = Number((totalWorkedMinutes / 60).toFixed(2));
-
-              overtimePay = overtimeHours * policy.overtimeHourlyRate;
-            } else {
-              const extraMins = totalWorkedMinutes - requiredMinutes;
-
-              if (extraMins > 0 && extraMins >= policy.overtimeThresholdMins) {
-                overtimeHours = Number((extraMins / 60).toFixed(2));
-
-                overtimePay = overtimeHours * policy.overtimeHourlyRate;
-              }
-            }
           } else {
-            status = "Half-Day";
+            // ===== 1. CHECK-IN BUFFER LOGIC =====
+            // Window: [shiftInDate - bufferMins, shiftInDate + bufferMins]
+            // If punchIn is within this window (e.g. 8:30 AM to 9:30 AM for a 9:00 AM shift with 30m buffer),
+            // working hours start at shiftInDate (9:00 AM).
+            // If punchIn is earlier than (shiftInDate - bufferMins) (e.g. 8:29 AM),
+            // the early buffer window does not absorb it, so working hours start from punchIn (giving 31 extra minutes).
+            // If punchIn is later than (shiftInDate + bufferMins) (e.g. 9:31 AM),
+            // grace period is exceeded and working hours start from punchIn.
+            const earlyLimit = shiftInDate.getTime() - bufferMins * 60000;
+            const lateLimit = shiftInDate.getTime() + bufferMins * 60000;
+            const punchInTime = punchIn.getTime();
+
+            let effectivePunchIn = punchIn;
+            if (punchInTime >= earlyLimit && punchInTime <= lateLimit) {
+              effectivePunchIn = shiftInDate;
+            } else {
+              effectivePunchIn = punchIn;
+            }
+
+            // ===== 2. CHECK-OUT & OVERTIME BUFFER LOGIC =====
+            // If employee punches out after shiftOutDate:
+            // - If extra minutes <= otThresholdMins (e.g. leaves at 6:30 PM for a 6:00 PM shift with 30m threshold):
+            //   overtime is NOT granted (OT = 0), and that extra time is not added to working hours.
+            // - If extra minutes > otThresholdMins (e.g. leaves at 6:32 PM):
+            //   overtime threshold is exceeded, so the FULL extra duration (32 mins) is granted as OT and added to working hours.
+            // If employee punches out at or before shiftOutDate:
+            //   effectivePunchOut is punchOut, OT = 0.
+            let effectivePunchOut = punchOut;
+            let overtimeMins = 0;
+
+            if (punchOut.getTime() > shiftOutDate.getTime()) {
+              const extraPostShiftMins = Math.round(
+                (punchOut.getTime() - shiftOutDate.getTime()) / 60000
+              );
+
+              if (extraPostShiftMins > otThresholdMins) {
+                overtimeMins = extraPostShiftMins;
+                effectivePunchOut = punchOut;
+              } else {
+                overtimeMins = 0;
+                effectivePunchOut = shiftOutDate;
+              }
+            } else {
+              overtimeMins = 0;
+              effectivePunchOut = punchOut;
+            }
+
+            totalWorkedMinutes = Math.round(
+              (effectivePunchOut.getTime() - effectivePunchIn.getTime()) / 60000
+            );
+            if (totalWorkedMinutes < 0) totalWorkedMinutes = 0;
+
+            if (overtimeMins > 0) {
+              overtimeHours = Number((overtimeMins / 60).toFixed(2));
+              overtimePay = Number(
+                (overtimeHours * (policy.overtimeHourlyRate || 0)).toFixed(2)
+              );
+            }
+
+            // ===== 3. STATUS LOGIC =====
+            if (totalWorkedMinutes >= requiredMinutes - bufferMins) {
+              status = "Present";
+            } else {
+              status = "Half-Day";
+            }
           }
         } else if (punchIn && !punchOut) {
           status = "Half-Day";
