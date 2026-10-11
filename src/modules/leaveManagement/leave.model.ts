@@ -36,7 +36,18 @@ const leaveSchema = new Schema<ILeave>(
 
     leaveType: {
       type: String,
-      enum: ["Sick", "Casual", "Paid", "Unpaid"],
+      enum: [
+        "Sick",
+        "Casual",
+        "Paid",
+        "Unpaid",
+        "Leave",
+        "Earned",
+        "Loss of Pay",
+        "Maternity",
+        "Paternity",
+      ],
+      default: "Casual",
       required: true,
     },
 

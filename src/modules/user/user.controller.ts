@@ -1162,6 +1162,7 @@ export const getUsersDropdown = async (c: Context) => {
     // ✅ query params
     const search = c.req.query("search") || "";
     const companyId = c.req.query("companyId");
+    const departmentId = c.req.query("departmentId");
     const limit = parseInt(c.req.query("limit") || "20");
     const page = parseInt(c.req.query("page") || "1");
     const skip = (page - 1) * limit;
@@ -1174,6 +1175,11 @@ export const getUsersDropdown = async (c: Context) => {
     // ✅ company filter
     if (companyId && mongoose.Types.ObjectId.isValid(companyId)) {
       filter.companyId = new mongoose.Types.ObjectId(companyId);
+    }
+
+    // ✅ department filter
+    if (departmentId && mongoose.Types.ObjectId.isValid(departmentId)) {
+      filter.departmentId = new mongoose.Types.ObjectId(departmentId);
     }
 
     // ✅ search by name OR employeeId
@@ -1201,6 +1207,20 @@ export const getUsersDropdown = async (c: Context) => {
         }
       },
       {
+        $lookup: {
+          from: "departments",
+          localField: "departmentId",
+          foreignField: "_id",
+          as: "deptData"
+        }
+      },
+      {
+        $unwind: {
+          path: "$deptData",
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      {
         $match: filter
       },
       {
@@ -1209,7 +1229,9 @@ export const getUsersDropdown = async (c: Context) => {
           name: 1,
           otherName: 1,
           employeeId: "$employeeData.employeeId",
-          uniqueId: 1
+          uniqueId: 1,
+          departmentId: "$departmentId",
+          departmentName: { $ifNull: ["$deptData.name", "$department"] },
         }
       },
       { $sort: { name: 1 } },

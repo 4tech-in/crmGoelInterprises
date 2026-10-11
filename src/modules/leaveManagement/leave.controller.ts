@@ -14,12 +14,14 @@ export const applyLeave = async (c: Context) => {
     const { userId, employeeId, fromDate, toDate, leaveType, status, reason, name } = body;
 
     // ✅ validation
-    if (!fromDate || !toDate || !leaveType) {
+    if (!fromDate || !toDate) {
       return c.json(
-        { message: "fromDate, toDate, leaveType required" },
+        { message: "fromDate and toDate are required" },
         400
       );
     }
+
+    const finalLeaveType = leaveType || "Casual";
 
     let user;
 
@@ -81,7 +83,7 @@ export const applyLeave = async (c: Context) => {
       fromDate: start,
       toDate: end,
       totalDays,
-      leaveType,
+      leaveType: finalLeaveType,
       reason,
       name,
       status: status || "Pending",

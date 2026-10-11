@@ -3,6 +3,7 @@ import Fuel from "./fuel.model";
 import path from "path";
 import fs from "fs";
 import mongoose from "mongoose";
+import * as XLSX from "xlsx";
 
 const calculateFuelAverage = async (vehicleId: any, currentOdometer: number, totalFuel: number, currentEntryId?: string) => {
   try {
@@ -38,6 +39,10 @@ export const createFuelEntry = async (c: Context) => {
       
       // Extract basic fields
       fuelData.vehicleId = formData.get("vehicleId");
+      if (formData.has("employeeId")) {
+        const emp = formData.get("employeeId");
+        fuelData.employeeId = emp && emp !== "undefined" && emp !== "null" ? emp : null;
+      }
       fuelData.odometer = Number(formData.get("odometer"));
       fuelData.fuelType = formData.get("fuelType");
       fuelData.ratePerLtr = Number(formData.get("ratePerLtr"));
@@ -69,6 +74,9 @@ export const createFuelEntry = async (c: Context) => {
       fuelData.images = uploadedFilePaths;
     } else {
       fuelData = await c.req.json();
+      if (fuelData.employeeId === "" || fuelData.employeeId === "null" || fuelData.employeeId === "undefined") {
+        fuelData.employeeId = null;
+      }
     }
 
     const totalFuel = fuelData.totalFuel !== undefined && !isNaN(fuelData.totalFuel) && fuelData.totalFuel > 0
@@ -102,6 +110,8 @@ export const getFuelEntries = async (c: Context) => {
     const limit = parseInt(c.req.query("limit") || "10");
     const search = c.req.query("search") || "";
     const vehicleId = c.req.query("vehicleId");
+    const startDate = c.req.query("startDate");
+    const endDate = c.req.query("endDate");
     const sortBy = c.req.query("sortBy") || "createdAt";
     const sortOrder = c.req.query("sortOrder") || "desc";
 
@@ -122,6 +132,17 @@ export const getFuelEntries = async (c: Context) => {
       {
         $lookup: {
           from: "users",
+          localField: "employeeId",
+          foreignField: "_id",
+          as: "employeeDetails",
+        },
+      },
+      {
+        $unwind: { path: "$employeeDetails", preserveNullAndEmptyArrays: true },
+      },
+      {
+        $lookup: {
+          from: "users",
           localField: "createdBy",
           foreignField: "_id",
           as: "userDetails",
@@ -137,12 +158,39 @@ export const getFuelEntries = async (c: Context) => {
       match.$or = [
         { "vehicleDetails.vehicleNo": { $regex: search, $options: "i" } },
         { "vehicleDetails.vehicleCode": { $regex: search, $options: "i" } },
+        { "employeeDetails.name": { $regex: search, $options: "i" } },
+        { "employeeDetails.otherName": { $regex: search, $options: "i" } },
         { fuelType: { $regex: search, $options: "i" } },
       ];
     }
 
     if (vehicleId) {
-      match.vehicleId = new mongoose.Types.ObjectId(vehicleId);
+      if (mongoose.Types.ObjectId.isValid(vehicleId)) {
+        match.$or = [
+          { vehicleId: new mongoose.Types.ObjectId(vehicleId) },
+          { "vehicleDetails.vehicleNo": vehicleId },
+        ];
+      } else {
+        match["vehicleDetails.vehicleNo"] = vehicleId;
+      }
+    }
+
+    if (startDate || endDate) {
+      match.fillingDate = {};
+      if (startDate) {
+        const s = new Date(startDate);
+        if (!isNaN(s.getTime())) {
+          s.setHours(0, 0, 0, 0);
+          match.fillingDate.$gte = s;
+        }
+      }
+      if (endDate) {
+        const e = new Date(endDate);
+        if (!isNaN(e.getTime())) {
+          e.setHours(23, 59, 59, 999);
+          match.fillingDate.$lte = e;
+        }
+      }
     }
 
     if (Object.keys(match).length > 0) {
@@ -164,6 +212,19 @@ export const getFuelEntries = async (c: Context) => {
               $project: {
                 _id: 1,
                 vehicleId: "$vehicleDetails",
+                employeeId: {
+                  $cond: {
+                    if: "$employeeDetails._id",
+                    then: {
+                      _id: "$employeeDetails._id",
+                      name: "$employeeDetails.name",
+                      otherName: "$employeeDetails.otherName",
+                      uniqueId: "$employeeDetails.uniqueId",
+                      employeeId: "$employeeDetails.employeeId",
+                    },
+                    else: null,
+                  },
+                },
                 odometer: 1,
                 fuelType: 1,
                 ratePerLtr: 1,
@@ -210,6 +271,7 @@ export const getFuelEntryById = async (c: Context) => {
     const id = c.req.param("id");
     const entry = await Fuel.findById(id)
       .populate("vehicleId", "vehicleNo vehicleCode")
+      .populate("employeeId", "name otherName uniqueId employeeId")
       .populate("createdBy", "name email");
     if (!entry) return c.json({ error: "Fuel entry not found" }, 404);
     return c.json(entry);
@@ -229,6 +291,10 @@ export const updateFuelEntry = async (c: Context) => {
       
       // Basic fields
       if (formData.has("vehicleId")) updateData.vehicleId = formData.get("vehicleId");
+      if (formData.has("employeeId")) {
+        const emp = formData.get("employeeId");
+        updateData.employeeId = emp && emp !== "undefined" && emp !== "null" ? emp : null;
+      }
       if (formData.has("odometer")) updateData.odometer = Number(formData.get("odometer"));
       if (formData.has("fuelType")) updateData.fuelType = formData.get("fuelType");
       if (formData.has("ratePerLtr")) updateData.ratePerLtr = Number(formData.get("ratePerLtr"));
@@ -257,6 +323,9 @@ export const updateFuelEntry = async (c: Context) => {
       }
     } else {
       updateData = await c.req.json();
+      if (updateData.employeeId === "" || updateData.employeeId === "null" || updateData.employeeId === "undefined") {
+        updateData.employeeId = null;
+      }
     }
 
     const existingEntry = await Fuel.findById(id);
@@ -373,3 +442,192 @@ export const deleteFuelImages = async (c: Context) => {
     return c.json({ error: error.message || "Failed to delete images" }, 500);
   }
 };
+
+export const exportFuelEntries = async (c: Context) => {
+  try {
+    const search = c.req.query("search") || "";
+    const vehicleId = c.req.query("vehicleId");
+    const startDate = c.req.query("startDate");
+    const endDate = c.req.query("endDate");
+    const format = c.req.query("format") || "json";
+
+    const pipeline: any[] = [
+      {
+        $lookup: {
+          from: "vehicles",
+          localField: "vehicleId",
+          foreignField: "_id",
+          as: "vehicleDetails",
+        },
+      },
+      {
+        $unwind: { path: "$vehicleDetails", preserveNullAndEmptyArrays: true },
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "employeeId",
+          foreignField: "_id",
+          as: "employeeDetails",
+        },
+      },
+      {
+        $unwind: { path: "$employeeDetails", preserveNullAndEmptyArrays: true },
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "createdBy",
+          foreignField: "_id",
+          as: "userDetails",
+        },
+      },
+      {
+        $unwind: { path: "$userDetails", preserveNullAndEmptyArrays: true },
+      },
+    ];
+
+    const match: any = {};
+    if (search) {
+      match.$or = [
+        { "vehicleDetails.vehicleNo": { $regex: search, $options: "i" } },
+        { "vehicleDetails.vehicleCode": { $regex: search, $options: "i" } },
+        { "employeeDetails.name": { $regex: search, $options: "i" } },
+        { "employeeDetails.otherName": { $regex: search, $options: "i" } },
+        { fuelType: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    if (vehicleId) {
+      if (mongoose.Types.ObjectId.isValid(vehicleId)) {
+        match.$or = [
+          { vehicleId: new mongoose.Types.ObjectId(vehicleId) },
+          { "vehicleDetails.vehicleNo": vehicleId },
+        ];
+      } else {
+        match["vehicleDetails.vehicleNo"] = vehicleId;
+      }
+    }
+
+    if (startDate || endDate) {
+      match.fillingDate = {};
+      if (startDate) {
+        const s = new Date(startDate);
+        if (!isNaN(s.getTime())) {
+          s.setHours(0, 0, 0, 0);
+          match.fillingDate.$gte = s;
+        }
+      }
+      if (endDate) {
+        const e = new Date(endDate);
+        if (!isNaN(e.getTime())) {
+          e.setHours(23, 59, 59, 999);
+          match.fillingDate.$lte = e;
+        }
+      }
+    }
+
+    if (Object.keys(match).length > 0) {
+      pipeline.push({ $match: match });
+    }
+
+    pipeline.push(
+      { $sort: { fillingDate: -1, createdAt: -1 } },
+      {
+        $project: {
+          _id: 1,
+          vehicleId: "$vehicleDetails",
+          employeeId: {
+            $cond: {
+              if: "$employeeDetails._id",
+              then: {
+                _id: "$employeeDetails._id",
+                name: "$employeeDetails.name",
+                otherName: "$employeeDetails.otherName",
+                uniqueId: "$employeeDetails.uniqueId",
+                employeeId: "$employeeDetails.employeeId",
+              },
+              else: null,
+            },
+          },
+          odometer: 1,
+          fuelType: 1,
+          ratePerLtr: 1,
+          totalAmount: 1,
+          fillingDate: 1,
+          average: 1,
+          totalFuel: 1,
+          createdBy: {
+            _id: "$userDetails._id",
+            name: "$userDetails.name",
+            email: "$userDetails.email",
+          },
+          createdAt: 1,
+        },
+      }
+    );
+
+    const data = await Fuel.aggregate(pipeline);
+
+    if (format === "xlsx") {
+      const rows = data.map((item, index) => {
+        const dateStr = item.fillingDate
+          ? new Date(item.fillingDate).toISOString().split("T")[0]
+          : "";
+        const driverName = item.employeeId
+          ? `${item.employeeId.name || ""}${item.employeeId.employeeId ? ` (${item.employeeId.employeeId})` : ""}`
+          : "Not assigned";
+        return {
+          "Sr. No.": index + 1,
+          "Date": dateStr,
+          "Vehicle No": item.vehicleId?.vehicleNo || "N/A",
+          "Vehicle Code": item.vehicleId?.vehicleCode || "",
+          "Driver / Employee": driverName,
+          "Odometer (KM)": item.odometer ?? 0,
+          "Fuel Type": item.fuelType || "Diesel",
+          "Rate / Ltr (₹)": item.ratePerLtr ?? 0,
+          "Total Fuel (Ltr)": item.totalFuel ?? 0,
+          "Average (km/L)": item.average ?? 0,
+          "Amount (₹)": item.totalAmount ?? 0,
+        };
+      });
+
+      const worksheet = XLSX.utils.json_to_sheet(rows);
+      worksheet["!cols"] = [
+        { wch: 8 },
+        { wch: 14 },
+        { wch: 18 },
+        { wch: 15 },
+        { wch: 25 },
+        { wch: 15 },
+        { wch: 12 },
+        { wch: 15 },
+        { wch: 16 },
+        { wch: 15 },
+        { wch: 16 },
+      ];
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Fuel Expenses");
+      const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+
+      return new Response(buffer, {
+        headers: {
+          "Content-Type":
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "Content-Disposition": `attachment; filename="fuel_expenses_${Date.now()}.xlsx"`,
+        },
+      });
+    }
+
+    return c.json({
+      success: true,
+      count: data.length,
+      data,
+    });
+  } catch (error: any) {
+    console.error("Export fuel error:", error);
+    return c.json({ error: error.message || "Failed to export fuel entries" }, 500);
+  }
+};
+

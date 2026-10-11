@@ -36,7 +36,8 @@ export const getVehicles = async (c: Context) => {
     if (search) {
       filter.$or = [
         { vehicleNo: { $regex: search, $options: "i" } },
-        { vehicleCode: { $regex: search, $options: "i" } }
+        { vehicleCode: { $regex: search, $options: "i" } },
+        { fuelType: { $regex: search, $options: "i" } }
       ];
     }
 
@@ -48,12 +49,18 @@ export const getVehicles = async (c: Context) => {
         .sort(sort)
         .skip(skip)
         .limit(limit)
-        .populate("createdBy", "name email"),
+        .populate("createdBy", "name email")
+        .lean(),
       Vehicle.countDocuments(filter)
     ]);
 
+    const formattedVehicles = vehicles.map((v: any) => ({
+      ...v,
+      fuelType: v.fuelType || "Diesel"
+    }));
+
     return c.json({
-      data: vehicles,
+      data: formattedVehicles,
       pagination: {
         total,
         page,
@@ -69,9 +76,12 @@ export const getVehicles = async (c: Context) => {
 export const getVehicleById = async (c: Context) => {
   try {
     const id = c.req.param("id");
-    const vehicle = await Vehicle.findById(id).populate("createdBy", "name email");
+    const vehicle = await Vehicle.findById(id).populate("createdBy", "name email").lean();
     if (!vehicle) return c.json({ error: "Vehicle not found" }, 404);
-    return c.json(vehicle);
+    return c.json({
+      ...vehicle,
+      fuelType: (vehicle as any).fuelType || "Diesel"
+    });
   } catch (error: any) {
     return c.json({ error: error.message }, 500);
   }

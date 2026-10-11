@@ -2,6 +2,7 @@ import mongoose, { Schema, Document } from "mongoose";
 
 export interface IFuel extends Document {
   vehicleId: mongoose.Types.ObjectId;
+  employeeId?: mongoose.Types.ObjectId;
   odometer: number;
   fuelType: string;
   ratePerLtr: number;
@@ -21,6 +22,11 @@ const FuelSchema: Schema = new Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Vehicle",
       required: true,
+    },
+    employeeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
     },
     odometer: {
       type: Number,
