@@ -1755,3 +1755,187 @@ export const getTodayAttendanceSummary = async (c: Context) => {
     return c.json({ message: error.message }, 500);
   }
 };
+
+// ===== GET MONTHLY ATTENDANCE MATRIX FOR EXPORT =====
+export const getMonthlyAttendanceMatrix = async (c: Context) => {
+  try {
+    const { year, month, companyId } = c.req.query();
+
+    const currentYear = new Date().getFullYear();
+    const currentMonth = new Date().getMonth() + 1;
+
+    const yearNum = year ? parseInt(year, 10) : currentYear;
+    const monthNum = month ? parseInt(month, 10) : currentMonth;
+
+    const startDate = new Date(yearNum, monthNum - 1, 1);
+    startDate.setHours(0, 0, 0, 0);
+    const endDate = new Date(yearNum, monthNum, 0);
+    endDate.setHours(23, 59, 59, 999);
+    const totalDaysInMonth = new Date(yearNum, monthNum, 0).getDate();
+
+    // Base user filter (exclude admin)
+    const userFilter: any = { role: { $ne: "admin" } };
+    if (companyId && companyId !== "all") {
+      const compIds = companyId
+        .split(",")
+        .map((id) => id.trim())
+        .filter((id) => Types.ObjectId.isValid(id))
+        .map((id) => new Types.ObjectId(id));
+      if (compIds.length > 0) {
+        userFilter.companyId = { $in: compIds };
+      }
+    }
+
+    // Fetch users
+    const users = await User.find(userFilter)
+      .select(
+        "_id name otherName uniqueId employeeObjId designation department companyId",
+      )
+      .populate("companyId", "name")
+      .populate("employeeObjId", "employeeId")
+      .sort({ name: 1 })
+      .lean();
+
+    const userIds = users.map((u: any) => u._id);
+
+    // Fetch attendance records for this month
+    const attendanceRecords = await Attendance.find({
+      userId: { $in: userIds },
+      date: { $gte: startDate, $lte: endDate },
+    }).lean();
+
+    // Map: userId -> Map(dayNumber -> attendance)
+    const userAttendanceMap = new Map<string, Map<number, any>>();
+    attendanceRecords.forEach((att: any) => {
+      const uid = att.userId.toString();
+      const d = new Date(att.date);
+      const day = d.getDate();
+      if (!userAttendanceMap.has(uid)) {
+        userAttendanceMap.set(uid, new Map());
+      }
+      userAttendanceMap.get(uid)!.set(day, att);
+    });
+
+    // Fetch approved leaves
+    const leaves = await Leave.find({
+      userId: { $in: userIds },
+      status: "Approved",
+      fromDate: { $lte: endDate },
+      toDate: { $gte: startDate },
+    }).lean();
+
+    const userLeaveMap = new Map<string, Set<number>>();
+    leaves.forEach((l: any) => {
+      const uid = l.userId.toString();
+      if (!userLeaveMap.has(uid)) {
+        userLeaveMap.set(uid, new Set());
+      }
+      const from = new Date(
+        Math.max(new Date(l.fromDate).getTime(), startDate.getTime()),
+      );
+      const to = new Date(
+        Math.min(new Date(l.toDate).getTime(), endDate.getTime()),
+      );
+      for (let day = from.getDate(); day <= to.getDate(); day++) {
+        userLeaveMap.get(uid)!.add(day);
+      }
+    });
+
+    // Construct matrix for each user
+    const result = users.map((u: any, idx: number) => {
+      const uid = u._id.toString();
+      const attMap = userAttendanceMap.get(uid) || new Map();
+      const leaveDays = userLeaveMap.get(uid) || new Set();
+
+      const days: Record<
+        number,
+        { status: string; punchIn?: string; punchOut?: string; hours?: number }
+      > = {};
+      let presentCount = 0;
+      let absentCount = 0;
+      let halfDayCount = 0;
+      let leaveCount = 0;
+      let totalOtHours = 0;
+      let totalWorkedMinutes = 0;
+
+      for (let day = 1; day <= totalDaysInMonth; day++) {
+        const att = attMap.get(day);
+        const onLeave = leaveDays.has(day);
+
+        let dayStatus = "--";
+        if (att) {
+          dayStatus = att.status || (att.punchIn ? "Present" : "Absent");
+          if (dayStatus === "Present") presentCount++;
+          else if (dayStatus === "Absent") absentCount++;
+          else if (dayStatus === "Half-Day") halfDayCount++;
+
+          totalOtHours += att.overtimeHours || 0;
+          totalWorkedMinutes += att.totalWorkedMinutes || 0;
+        } else if (onLeave) {
+          dayStatus = "On Leave";
+          leaveCount++;
+        }
+
+        const formatPunchTime = (val: any) => {
+          if (!val) return undefined;
+          const d = new Date(val);
+          if (isNaN(d.getTime())) return undefined;
+          const hours = String(d.getHours()).padStart(2, "0");
+          const minutes = String(d.getMinutes()).padStart(2, "0");
+          return `${hours}:${minutes}`;
+        };
+
+        days[day] = {
+          status: dayStatus,
+          punchIn: formatPunchTime(att?.punchIn),
+          punchOut: formatPunchTime(att?.punchOut),
+          hours: att?.totalWorkedMinutes
+            ? Number((att.totalWorkedMinutes / 60).toFixed(1))
+            : 0,
+        };
+      }
+
+      return {
+        sNo: idx + 1,
+        user: {
+          _id: uid,
+          name: u.otherName || u.name,
+          employeeId: (u.employeeObjId as any)?.employeeId || "N/A",
+          uniqueId: u.uniqueId,
+          designation: u.designation || "N/A",
+          department: u.department || "N/A",
+          companyName: (u.companyId as any)?.name || "N/A",
+        },
+        days,
+        summary: {
+          present: presentCount,
+          absent: absentCount,
+          halfDay: halfDayCount,
+          onLeave: leaveCount,
+          totalWorkedHours: Number((totalWorkedMinutes / 60).toFixed(1)),
+          overtimeHours: Number(totalOtHours.toFixed(1)),
+        },
+      };
+    });
+
+    return c.json(
+      {
+        success: true,
+        year: yearNum,
+        month: monthNum,
+        totalDays: totalDaysInMonth,
+        data: result,
+      },
+      200,
+    );
+  } catch (error: any) {
+    console.error("Monthly Attendance Matrix Error:", error);
+    return c.json(
+      {
+        success: false,
+        message: error.message || "Failed to generate monthly attendance matrix",
+      },
+      500,
+    );
+  }
+};

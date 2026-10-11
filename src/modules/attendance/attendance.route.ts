@@ -14,7 +14,8 @@ import {
   manualMarkAttendance,
   getAttendanceCountByMonth,
   getTodayAttendanceSummary,
-  getAttendancesWithSummary
+  getAttendancesWithSummary,
+  getMonthlyAttendanceMatrix
 } from "./attendance.controller";
 
 const attendanceRoutes = new Hono();
@@ -36,6 +37,9 @@ attendanceRoutes.get("/", getAttendances);
 
 // get Attendance with summary
 attendanceRoutes.get("/with-summary", getAttendancesWithSummary);
+
+// get Monthly Attendance Matrix for export
+attendanceRoutes.get("/monthly-matrix", getMonthlyAttendanceMatrix);
 
 // get Attendance
 attendanceRoutes.get("/dashboard-count", getTodayAttendanceSummary);
