@@ -1584,6 +1584,132 @@ export const genderDistributionWithFilter = async (c: Context) => {
     ]);
 
     // =========================================
+    // DEPARTMENT WISE STATS
+    // =========================================
+    const departmentWise = await User.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: "$departmentId",
+          totalUsers: { $sum: 1 },
+          male: {
+            $sum: { $cond: [{ $eq: [{ $toLower: "$gender" }, "male"] }, 1, 0] },
+          },
+          female: {
+            $sum: { $cond: [{ $eq: [{ $toLower: "$gender" }, "female"] }, 1, 0] },
+          },
+          other: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $ne: [{ $toLower: "$gender" }, "male"] },
+                    { $ne: [{ $toLower: "$gender" }, "female"] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+      },
+      {
+        $lookup: {
+          from: "departments",
+          let: { deptId: "$_id" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $eq: [{ $toString: "$_id" }, { $toString: "$$deptId" }],
+                },
+              },
+            },
+            { $project: { name: 1 } },
+          ],
+          as: "dept",
+        },
+      },
+      { $unwind: { path: "$dept", preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 0,
+          departmentId: { $ifNull: [{ $toString: "$_id" }, "unassigned"] },
+          departmentName: { $ifNull: ["$dept.name", "Unassigned"] },
+          totalUsers: 1,
+          male: 1,
+          female: 1,
+          other: 1,
+        },
+      },
+      { $sort: { totalUsers: -1 } },
+    ]);
+
+    // =========================================
+    // COMPANY WISE STATS
+    // =========================================
+    const companyWise = await User.aggregate([
+      { $match: { role: { $ne: "admin" } } },
+      {
+        $group: {
+          _id: "$companyId",
+          totalUsers: { $sum: 1 },
+          male: {
+            $sum: { $cond: [{ $eq: [{ $toLower: "$gender" }, "male"] }, 1, 0] },
+          },
+          female: {
+            $sum: { $cond: [{ $eq: [{ $toLower: "$gender" }, "female"] }, 1, 0] },
+          },
+          other: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $ne: [{ $toLower: "$gender" }, "male"] },
+                    { $ne: [{ $toLower: "$gender" }, "female"] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+      },
+      {
+        $lookup: {
+          from: "companies",
+          let: { compId: "$_id" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $eq: [{ $toString: "$_id" }, { $toString: "$$compId" }],
+                },
+              },
+            },
+            { $project: { name: 1 } },
+          ],
+          as: "company",
+        },
+      },
+      { $unwind: { path: "$company", preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 0,
+          companyId: { $ifNull: [{ $toString: "$_id" }, "unassigned"] },
+          companyName: { $ifNull: ["$company.name", "No Company"] },
+          totalUsers: 1,
+          male: 1,
+          female: 1,
+          other: 1,
+        },
+      },
+      { $sort: { totalUsers: -1 } },
+    ]);
+
+    // =========================================
     // RESPONSE
     // =========================================
     return c.json(
@@ -1591,11 +1717,18 @@ export const genderDistributionWithFilter = async (c: Context) => {
         success: true,
 
         data: {
+          overall: {
+            totalUsers,
+            male: genderStats[0]?.male || 0,
+            female: genderStats[0]?.female || 0,
+            other: genderStats[0]?.other || 0,
+          },
           totalUsers,
-
           male: genderStats[0]?.male || 0,
           female: genderStats[0]?.female || 0,
           other: genderStats[0]?.other || 0,
+          departmentWise,
+          companyWise,
         },
       },
       200
