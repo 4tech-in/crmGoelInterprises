@@ -1,6 +1,7 @@
 import { EmployeeId } from "./employeeId.model.ts";
 import type { Context } from "hono";
 import { User } from "./user.model.ts";
+import Company from "../company/company.model.ts";
 import mongoose from "mongoose";
 
 
@@ -136,7 +137,15 @@ export const getAvailableEmployeeIds = async (c: Context) => {
     const page = parseInt(c.req.query("page") || "1");
     const limit = parseInt(c.req.query("limit") || "10");
     const search = c.req.query("search") || "";
-    const prefix = c.req.query("prefix")
+    let prefix = c.req.query("prefix");
+    const companyId = c.req.query("companyId");
+
+    if (!prefix && companyId && mongoose.Types.ObjectId.isValid(companyId)) {
+      const company = await Company.findById(companyId).select("prefix");
+      if (company?.prefix) {
+        prefix = company.prefix;
+      }
+    }
 
     const skip = (page - 1) * limit;
 
@@ -153,7 +162,7 @@ export const getAvailableEmployeeIds = async (c: Context) => {
     if (search.trim()) {
       query.employeeId = { $regex: search, $options: "i" };
     }
-    if(prefix){
+    if (prefix) {
       query.prefix = prefix;
     }
 

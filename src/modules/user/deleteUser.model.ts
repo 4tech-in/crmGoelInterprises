@@ -108,9 +108,7 @@ const deletedUserSchema = new Schema<IUser>(
     email: {
       type: String,
       required: false,
-      sparse: true, // ✅ add this
-       unique: true,   // ✅ add this
-      },
+    },
 
     password: {
       iv: { type: String },
@@ -137,7 +135,6 @@ const deletedUserSchema = new Schema<IUser>(
     uniqueId: {
       type: Number,
       required: true,
-      unique: true,
     },
 
     attendancePolicyId: {

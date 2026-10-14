@@ -1846,16 +1846,32 @@ export const getDeletedUsers = async (c: Context) => {
   try {
     const users = await DeletedUser.find()
       .populate("createdBy")
-      .populate("employeeObjId","employeeId")
-      .populate("attendancePolicyId","name")
-      .populate("payrollPolicyId","name")
-      .populate("companyId","name")
-      .populate("designationId","name")
-      .populate("departmentId","name")
+      .populate("employeeObjId", "employeeId prefix")
+      .populate("attendancePolicyId", "name")
+      .populate("payrollPolicyId", "name")
+      .populate("companyId", "name prefix")
+      .populate("designationId", "name")
+      .populate("departmentId", "name")
       .sort({ createdAt: -1 })
       .lean();
 
-    return c.json(users, 200);
+    // Check which employeeObjIds are still available vs already assigned in active User collection
+    const activeAssignedIds = await User.find({
+      employeeObjId: { $exists: true, $ne: null }
+    }).distinct("employeeObjId");
+
+    const activeSet = new Set(activeAssignedIds.map((id) => id.toString()));
+
+    const result = users.map((u: any) => {
+      const prevEmpId = u.employeeObjId?._id?.toString();
+      const isPreviousEmployeeIdAvailable = prevEmpId ? !activeSet.has(prevEmpId) : false;
+      return {
+        ...u,
+        isPreviousEmployeeIdAvailable,
+      };
+    });
+
+    return c.json(result, 200);
   } catch (error) {
     console.error("Fetch Deleted Users Error:", error);
     return c.json({ message: "Something went wrong" }, 500);
@@ -1863,10 +1879,12 @@ export const getDeletedUsers = async (c: Context) => {
 };
 
 
-//  not in use  restore user api
+// Restore user API with employee ID assignment & validation
 export const restoreUser = async (c: Context) => {
   try {
     const id = c.req.param("id");
+    const body = await c.req.json().catch(() => ({}));
+    const { employeeObjId } = body;
 
     // get deleted user
     const deletedUser: any = await DeletedUser.findById(id).lean();
@@ -1880,11 +1898,91 @@ export const restoreUser = async (c: Context) => {
       );
     }
 
-    // remove unwanted mongoose fields
+    let targetEmployeeObjId = employeeObjId;
+
+    if (targetEmployeeObjId) {
+      if (!mongoose.Types.ObjectId.isValid(targetEmployeeObjId)) {
+        return c.json({ message: "Invalid Employee ID format" }, 400);
+      }
+
+      const empIdDoc = await EmployeeId.findById(targetEmployeeObjId);
+      if (!empIdDoc) {
+        return c.json({ message: "Selected Employee ID not found" }, 404);
+      }
+
+      const alreadyAssigned = await User.findOne({
+        employeeObjId: targetEmployeeObjId,
+      });
+      if (alreadyAssigned) {
+        return c.json(
+          {
+            message: `Employee ID (${empIdDoc.employeeId}) is already assigned to active employee ${alreadyAssigned.name}. Please select another Employee ID.`,
+          },
+          400
+        );
+      }
+
+      deletedUser.employeeObjId = targetEmployeeObjId;
+    } else {
+      // Check if previous employeeObjId exists and is still available
+      if (deletedUser.employeeObjId) {
+        const alreadyAssigned = await User.findOne({
+          employeeObjId: deletedUser.employeeObjId,
+        });
+        if (alreadyAssigned) {
+          return c.json(
+            {
+              message: "Previous Employee ID is already assigned to another active employee. Please select an available Employee ID to restore.",
+              code: "EMPLOYEE_ID_ALREADY_ASSIGNED",
+            },
+            400
+          );
+        }
+      } else {
+        return c.json(
+          {
+            message: "No Employee ID assigned. Please choose an available Employee ID to restore this employee.",
+            code: "EMPLOYEE_ID_REQUIRED",
+          },
+          400
+        );
+      }
+    }
+
+    // Check uniqueId collision with active users
+    if (deletedUser.uniqueId) {
+      const activeWithUniqueId = await User.findOne({ uniqueId: deletedUser.uniqueId });
+      if (activeWithUniqueId) {
+        return c.json(
+          {
+            message: `Punch ID (${deletedUser.uniqueId}) is already assigned to active user (${activeWithUniqueId.name}).`,
+          },
+          400
+        );
+      }
+    }
+
+    // Check email collision if present
+    if (deletedUser.email) {
+      const activeWithEmail = await User.findOne({ email: deletedUser.email });
+      if (activeWithEmail) {
+        return c.json(
+          {
+            message: `Email (${deletedUser.email}) is already in use by active user (${activeWithEmail.name}).`,
+          },
+          400
+        );
+      }
+    }
+
+    // remove unwanted mongoose and deletion fields
     delete deletedUser._id;
     delete deletedUser.__v;
     delete deletedUser.createdAt;
     delete deletedUser.updatedAt;
+    delete deletedUser.deletedAt;
+    delete deletedUser.deletedBy;
+    delete deletedUser.companyExitDate;
 
     // restore user
     const restoredUser = await User.create(deletedUser);
@@ -1899,12 +1997,19 @@ export const restoreUser = async (c: Context) => {
       },
       200
     );
-  } catch (error) {
+  } catch (error: any) {
     console.error("Restore User Error:", error);
+
+    if (error?.code === 11000) {
+      return c.json(
+        { message: "Duplicate value found (Email, Unique ID, or Employee ID exists in active users)." },
+        400
+      );
+    }
 
     return c.json(
       {
-        message: "Error restoring user",
+        message: error?.message || "Error restoring user",
         error,
       },
       500
