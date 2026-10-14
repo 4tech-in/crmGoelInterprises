@@ -4,6 +4,13 @@ import Asset from "./asset.model";
 export const createAsset = async (c: Context) => {
   try {
     const body = await c.req.json();
+    if (Array.isArray(body)) {
+      const assets = await Asset.insertMany(body);
+      return c.json({
+        message: `${assets.length} assets created successfully`,
+        data: assets,
+      }, 201);
+    }
     const newAsset = new Asset(body);
     await newAsset.save();
     return c.json({
