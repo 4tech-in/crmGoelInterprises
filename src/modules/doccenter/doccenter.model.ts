@@ -2,7 +2,7 @@ import mongoose, { Schema, Document } from "mongoose";
 
 export interface IDocCenter extends Document {
   title: string;
-  documentType: "Electricity" | "Water" | "Fuel" | "Other";
+  documentType: string;
   files: string[];
   createdBy: mongoose.Schema.Types.ObjectId;
   metadata: Record<string, any>;
@@ -15,7 +15,6 @@ const DocCenterSchema: Schema = new Schema(
     title: { type: String, required: true },
     documentType: {
       type: String,
-      enum: ["Electricity", "Water", "Fuel", "Other"],
       default: "Other",
     },
     files: [{ type: String }], // multiple file URLs

@@ -27,7 +27,7 @@ export const uploadDocument = async (c: Context) => {
     }
 
     for (const file of files) {
-      if (file instanceof File) {
+      if (file instanceof File && file.size > 0) {
         const timestamp = Date.now();
         // Sanitize filename to avoid space issues
         const sanitizedName = file.name.replace(/\s+/g, "_");
@@ -160,20 +160,19 @@ export const patchDocument = async (c: Context) => {
 
       // Handle file updates
       const files = formData.getAll("files");
-      if (files.length > 0 && files[0] instanceof File) {
+      const validFiles = files.filter((f): f is File => f instanceof File && f.size > 0);
+      if (validFiles.length > 0) {
         const newFilePaths: string[] = [];
         const uploadDir = path.join(process.cwd(), "uploads", "doccenter");
         if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
-        for (const file of files) {
-          if (file instanceof File) {
-              const timestamp = Date.now();
-              const sanitizedName = file.name.replace(/\s+/g, "_");
-              const uniqueName = `${timestamp}-${sanitizedName}`;
-              const filePath = path.join(uploadDir, uniqueName);
-              await Bun.write(filePath, file);
-              newFilePaths.push(`/uploads/doccenter/${uniqueName}`);
-          }
+        for (const file of validFiles) {
+          const timestamp = Date.now();
+          const sanitizedName = file.name.replace(/\s+/g, "_");
+          const uniqueName = `${timestamp}-${sanitizedName}`;
+          const filePath = path.join(uploadDir, uniqueName);
+          await Bun.write(filePath, file);
+          newFilePaths.push(`/uploads/doccenter/${uniqueName}`);
         }
         updateData.$push = { files: { $each: newFilePaths } };
       }
