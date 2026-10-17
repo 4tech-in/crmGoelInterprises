@@ -3,6 +3,29 @@ import DocCenter from "./doccenter.model";
 import path from "path";
 import fs from "fs";
 
+const REMOVED_ELECTRICITY_FIELDS = [
+  "consumptionCharges",
+  "fppca",
+  "edRate",
+  "ed",
+  "fixedCharges",
+  "mcTaxRate",
+  "mcTax",
+  "pfIncentive",
+  "regSurcharge",
+  "paymentRebate",
+  "sundryCharges",
+  "arrears",
+  "reversalOfArrear",
+  "billDate",
+  "dueDate",
+  "oldReadingKwh",
+  "newReadingKwh",
+  "oldReadingKvah",
+  "newReadingKvah",
+  "kwhKvahDiff",
+];
+
 export const uploadDocument = async (c: Context) => {
   try {
     const user = c.get("user");
@@ -40,10 +63,10 @@ export const uploadDocument = async (c: Context) => {
       }
     }
 
-    // Extract metadata (everything else)
+    // Extract metadata (everything else, stripping removed fields)
     const metadata: Record<string, any> = {};
     formData.forEach((value, key) => {
-      if (!["title", "documentType", "files", "reminder"].includes(key)) {
+      if (!["title", "documentType", "files", "reminder", ...REMOVED_ELECTRICITY_FIELDS].includes(key)) {
         metadata[key] = value;
       }
     });
@@ -153,7 +176,11 @@ export const patchDocument = async (c: Context) => {
       // Handle metadata if passed as JSON string in form-data
       if (formData.has("metadata")) {
         try {
-          updateData.metadata = JSON.parse(formData.get("metadata") as string);
+          const parsedMeta = JSON.parse(formData.get("metadata") as string);
+          if (parsedMeta && typeof parsedMeta === "object") {
+            REMOVED_ELECTRICITY_FIELDS.forEach((key) => delete parsedMeta[key]);
+          }
+          updateData.metadata = parsedMeta;
         } catch (e) {}
       }
 
@@ -179,6 +206,9 @@ export const patchDocument = async (c: Context) => {
     } else {
       // Regular JSON update
       updateData = await c.req.json();
+      if (updateData.metadata && typeof updateData.metadata === "object") {
+        REMOVED_ELECTRICITY_FIELDS.forEach((key) => delete updateData.metadata[key]);
+      }
     }
 
     const existingDoc = await DocCenter.findById(id);
