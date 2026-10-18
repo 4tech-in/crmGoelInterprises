@@ -26,6 +26,46 @@ const REMOVED_ELECTRICITY_FIELDS = [
   "kwhKvahDiff",
 ];
 
+const REMOVED_WATER_FIELDS = [
+  "billDate",
+  "dueDate",
+  "oldReading",
+  "newReading",
+  "actualReading",
+  "costPerUnit",
+  "currentWaterCharges",
+  "maintenanceCharges",
+  "sewerageCess",
+  "sewerageCessPercentage",
+  "meterRentals",
+  "garbageCharges",
+  "sundryCharges",
+  "arrears",
+  "adjPrevBill",
+  "mcTax",
+  "latePaymentSurcharge",
+  "paidAmount",
+  "paidOn",
+];
+
+const removedFieldsFor = (documentType: string) => {
+  if (documentType.toLowerCase() === "electricity") return REMOVED_ELECTRICITY_FIELDS;
+  if (documentType.toLowerCase() === "water") return REMOVED_WATER_FIELDS;
+  return [];
+};
+
+const sanitizeMetadata = (metadata: Record<string, any>, documentType: string) => {
+  const sanitized = { ...metadata };
+  removedFieldsFor(documentType).forEach((key) => delete sanitized[key]);
+  return sanitized;
+};
+
+const sanitizeDocument = (document: any) => {
+  const value = typeof document?.toObject === "function" ? document.toObject() : { ...document };
+  value.metadata = sanitizeMetadata(value.metadata || {}, value.documentType || "Other");
+  return value;
+};
+
 export const uploadDocument = async (c: Context) => {
   try {
     const user = c.get("user");
@@ -63,10 +103,11 @@ export const uploadDocument = async (c: Context) => {
       }
     }
 
-    // Extract metadata (everything else, stripping removed fields)
+    // Extract metadata, excluding fields retired for this document type.
     const metadata: Record<string, any> = {};
+    const removedFields = removedFieldsFor(documentType || "Other");
     formData.forEach((value, key) => {
-      if (!["title", "documentType", "files", "reminder", ...REMOVED_ELECTRICITY_FIELDS].includes(key)) {
+      if (!["title", "documentType", "files", "reminder", ...removedFields].includes(key)) {
         metadata[key] = value;
       }
     });
@@ -84,7 +125,7 @@ export const uploadDocument = async (c: Context) => {
 
     return c.json({
       message: "Document uploaded successfully",
-      data: newDoc,
+      data: sanitizeDocument(newDoc),
     }, 201);
   } catch (error: any) {
     console.error("Upload error:", error);
@@ -134,7 +175,7 @@ export const getDocuments = async (c: Context) => {
     ]);
 
     return c.json({
-      data: docs,
+      data: docs.map(sanitizeDocument),
       pagination: {
         total,
         page,
@@ -152,7 +193,7 @@ export const getDocumentById = async (c: Context) => {
     const id = c.req.param("id");
     const doc = await DocCenter.findById(id).populate("createdBy", "name email");
     if (!doc) return c.json({ error: "Document not found" }, 404);
-    return c.json(doc);
+    return c.json(sanitizeDocument(doc));
   } catch (error: any) {
     return c.json({ error: error.message }, 500);
   }
@@ -177,9 +218,6 @@ export const patchDocument = async (c: Context) => {
       if (formData.has("metadata")) {
         try {
           const parsedMeta = JSON.parse(formData.get("metadata") as string);
-          if (parsedMeta && typeof parsedMeta === "object") {
-            REMOVED_ELECTRICITY_FIELDS.forEach((key) => delete parsedMeta[key]);
-          }
           updateData.metadata = parsedMeta;
         } catch (e) {}
       }
@@ -206,14 +244,16 @@ export const patchDocument = async (c: Context) => {
     } else {
       // Regular JSON update
       updateData = await c.req.json();
-      if (updateData.metadata && typeof updateData.metadata === "object") {
-        REMOVED_ELECTRICITY_FIELDS.forEach((key) => delete updateData.metadata[key]);
-      }
     }
 
     const existingDoc = await DocCenter.findById(id);
     if (!existingDoc) {
       return c.json({ error: "Document not found" }, 404);
+    }
+
+    if (updateData.metadata && typeof updateData.metadata === "object") {
+      const documentType = String(updateData.documentType || existingDoc.documentType || "Other");
+      updateData.metadata = sanitizeMetadata(updateData.metadata, documentType);
     }
 
 
@@ -231,7 +271,7 @@ export const patchDocument = async (c: Context) => {
 
     return c.json({
       message: "Document updated successfully",
-      data: updatedDoc
+      data: sanitizeDocument(updatedDoc)
     });
   } catch (error: any) {
     console.error("Patch error:", error);
