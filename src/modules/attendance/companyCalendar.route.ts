@@ -6,8 +6,8 @@ const companyCalendarRouter = new Hono();
 
 companyCalendarRouter.use("*",verifyToken)
 
+companyCalendarRouter.post("/", generateCalendar);
 companyCalendarRouter.post("/generate", generateCalendar);
-
 
 companyCalendarRouter.put("/update-date", updateSingleDate);
 
