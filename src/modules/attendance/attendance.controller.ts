@@ -864,6 +864,136 @@ export const getAttendances = async (c: Context) => {
     if (status) filter.status = status;
     if (userId) filter.userId = new Types.ObjectId(userId as string);
 
+    // ===== USER SPECIFIC MONTHLY ATTENDANCE =====
+    if (userId && month && year) {
+      const yearNum = parseInt(year as string, 10);
+      const monthNum = parseInt(month as string, 10);
+      if (!isNaN(yearNum) && !isNaN(monthNum)) {
+        const startDate = new Date(yearNum, monthNum - 1, 1);
+        const endDate = new Date(yearNum, monthNum, 0, 23, 59, 59, 999);
+        filter.date = { $gte: startDate, $lte: endDate };
+
+        const rawData = await Attendance.find(filter)
+          .populate({
+            path: "userId",
+            select: "name email companyId otherName uniqueId",
+            populate: {
+              path: "companyId",
+              select: "name",
+            },
+          })
+          .sort({ date: 1 });
+
+        const existingDateMap = new Map<string, any>();
+        rawData.forEach((item) => {
+          const dt = new Date(item.date);
+          const y = dt.getUTCFullYear();
+          const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+          const d = String(dt.getUTCDate()).padStart(2, "0");
+          existingDateMap.set(`${y}-${m}-${d}`, item);
+        });
+
+        const leaves = await Leave.find({
+          userId: filter.userId,
+          status: "Approved",
+          fromDate: { $lte: endDate },
+          toDate: { $gte: startDate },
+        });
+
+        const leaveDateSet = new Set<string>();
+        leaves.forEach((l) => {
+          const startL = new Date(
+            Math.max(new Date(l.fromDate).getTime(), startDate.getTime())
+          );
+          const endL = new Date(
+            Math.min(new Date(l.toDate).getTime(), endDate.getTime())
+          );
+          for (
+            let cur = new Date(startL);
+            cur <= endL;
+            cur.setDate(cur.getDate() + 1)
+          ) {
+            const y = cur.getFullYear();
+            const m = String(cur.getMonth() + 1).padStart(2, "0");
+            const d = String(cur.getDate()).padStart(2, "0");
+            leaveDateSet.add(`${y}-${m}-${d}`);
+          }
+        });
+
+        const userObj =
+          rawData.length > 0 && rawData[0]
+            ? rawData[0].userId
+            : await User.findById(userId)
+                .select("name email companyId otherName uniqueId")
+                .populate("companyId", "name");
+
+        const daysInMonth = new Date(yearNum, monthNum, 0).getDate();
+        const now = new Date();
+        const isPastMonth =
+          yearNum < now.getFullYear() ||
+          (yearNum === now.getFullYear() && monthNum < now.getMonth() + 1);
+        const isCurrentMonth =
+          yearNum === now.getFullYear() && monthNum === now.getMonth() + 1;
+
+        const maxDay = isPastMonth
+          ? daysInMonth
+          : isCurrentMonth
+          ? now.getDate()
+          : 0;
+
+        const allRecords: any[] = [];
+        for (let d = 1; d <= maxDay; d++) {
+          const dateStr = `${yearNum}-${String(monthNum).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+          if (existingDateMap.has(dateStr)) {
+            allRecords.push(existingDateMap.get(dateStr));
+          } else if (leaveDateSet.has(dateStr)) {
+            const dt = new Date(Date.UTC(yearNum, monthNum - 1, d, 0, 0, 0, 0));
+            allRecords.push({
+              _id: `leave_${userId}_${dateStr}`,
+              userId: userObj,
+              date: dt,
+              status: "On Leave",
+              punchIn: null,
+              punchOut: null,
+              totalWorkedMinutes: 0,
+              overtimeHours: 0,
+            });
+          } else {
+            const dt = new Date(Date.UTC(yearNum, monthNum - 1, d, 0, 0, 0, 0));
+            allRecords.push({
+              _id: `absent_${userId}_${dateStr}`,
+              userId: userObj,
+              date: dt,
+              status: "Absent",
+              punchIn: null,
+              punchOut: null,
+              totalWorkedMinutes: 0,
+              overtimeHours: 0,
+            });
+          }
+        }
+
+        allRecords.sort(
+          (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+        );
+
+        let finalData = allRecords;
+        if (status) {
+          finalData = finalData.filter((item) => item.status === status);
+        }
+
+        return c.json(
+          {
+            data: finalData,
+            total: finalData.length,
+            page: pageNum,
+            limit: limitNum,
+          },
+          200
+        );
+      }
+    }
+
     if (month && year) {
       const yearNum = parseInt(year as string, 10);
       const monthNum = parseInt(month as string, 10);
