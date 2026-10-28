@@ -8,6 +8,49 @@ import { Types } from "mongoose";
 import Leave from "../leaveManagement/leave.model";
 import e from "express";
 
+const toDateKey = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+
+const getHolidayDateKeys = async (start: Date, end: Date) => {
+  const queryStart = new Date(start);
+  queryStart.setDate(queryStart.getDate() - 1);
+  const queryEnd = new Date(end);
+  queryEnd.setDate(queryEnd.getDate() + 1);
+
+  const holidays = await CalendarDay.find({
+    date: { $gte: queryStart, $lte: queryEnd },
+    dayType: "holiday",
+  }).select("date");
+
+  return new Set(
+    holidays.map((holiday) => {
+      const date = new Date(holiday.date);
+      return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+    }),
+  );
+};
+
+const isHolidayDate = (date: Date, holidayDateKeys: Set<string>) =>
+  date.getDay() === 0 || holidayDateKeys.has(toDateKey(date));
+
+const rangeContainsWorkingDay = (
+  start: Date,
+  end: Date,
+  holidayDateKeys: Set<string>,
+) => {
+  const current = new Date(start);
+  current.setHours(12, 0, 0, 0);
+  const last = new Date(end);
+  last.setHours(12, 0, 0, 0);
+
+  while (current <= last) {
+    if (!isHolidayDate(current, holidayDateKeys)) return true;
+    current.setDate(current.getDate() + 1);
+  }
+
+  return false;
+};
+
 // --- Attendance Policy controllers Start ---
 
 export const createAttendancePolicy = async (c: Context) => {
@@ -920,6 +963,8 @@ export const getAttendances = async (c: Context) => {
           }
         });
 
+        const holidayDateKeys = await getHolidayDateKeys(startDate, endDate);
+
         const userObj =
           rawData.length > 0 && rawData[0]
             ? rawData[0].userId
@@ -944,8 +989,23 @@ export const getAttendances = async (c: Context) => {
         const allRecords: any[] = [];
         for (let d = 1; d <= maxDay; d++) {
           const dateStr = `${yearNum}-${String(monthNum).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+          const dateValue = new Date(yearNum, monthNum - 1, d, 12, 0, 0, 0);
+          const isHoliday = isHolidayDate(dateValue, holidayDateKeys);
           if (existingDateMap.has(dateStr)) {
+            // A saved attendance record always takes priority over calendar fallback.
             allRecords.push(existingDateMap.get(dateStr));
+          } else if (isHoliday) {
+            const dt = new Date(Date.UTC(yearNum, monthNum - 1, d, 0, 0, 0, 0));
+            allRecords.push({
+              _id: `holiday_${userId}_${dateStr}`,
+              userId: userObj,
+              date: dt,
+              status: "Holiday",
+              punchIn: null,
+              punchOut: null,
+              totalWorkedMinutes: 0,
+              overtimeHours: 0,
+            });
           } else if (leaveDateSet.has(dateStr)) {
             const dt = new Date(Date.UTC(yearNum, monthNum - 1, d, 0, 0, 0, 0));
             allRecords.push({
@@ -1158,6 +1218,13 @@ export const getAttendancesWithSummary = async (c: Context) => {
 
     const leaveSet = new Set(leaves.map((l) => l.userId.toString()));
 
+    const holidayDateKeys = await getHolidayDateKeys(start, end);
+    const isHolidayOnlyRange = !rangeContainsWorkingDay(
+      start,
+      end,
+      holidayDateKeys,
+    );
+
     // ===== SUMMARY =====
     let present = 0;
     let absent = 0;
@@ -1267,6 +1334,22 @@ export const getAttendancesWithSummary = async (c: Context) => {
             status: "Not Marked",
           });
         }
+      } else if (isHolidayOnlyRange) {
+        finalAllUsers.push({
+          user: {
+            _id: user._id,
+            name: user.name,
+            designation: user.designation,
+            email: user.email,
+            company: user.companyId,
+            uniqueId: user.uniqueId,
+            employeeId: (user.employeeObjId as any)?.employeeId || null,
+            otherName: user.otherName,
+            department: user.department,
+          },
+          attendance: null,
+          status: "Holiday",
+        });
       } else if (leaveSet.has(uid)) {
         onLeave++;
 
@@ -1412,10 +1495,41 @@ export const updateMultipleAttendanceStatus = async (c: Context) => {
   try {
     const body = await c.req.json();
 
-    const { userIds, date, status, punchIn, punchOut } = body;
+    const { userIds, dates, date, punchIn, punchOut } = body;
+    const status = body.status === "Half Day" ? "Half-Day" : body.status;
+    const requestedDates = Array.isArray(dates) ? dates : date ? [date] : [];
 
-    if (!userIds || !Array.isArray(userIds) || !date || !status) {
-      return c.json({ message: "userIds, date, status required" }, 400);
+    if (
+      !Array.isArray(userIds) ||
+      userIds.length === 0 ||
+      requestedDates.length === 0 ||
+      !status
+    ) {
+      return c.json({ message: "userIds, dates, status required" }, 400);
+    }
+
+    const allowedStatuses = [
+      "Present",
+      "Absent",
+      "Half-Day",
+      "WeeklyOff",
+      "Holiday",
+    ];
+
+    if (!allowedStatuses.includes(status)) {
+      return c.json({ message: "Invalid attendance status" }, 400);
+    }
+
+    const normalizedDates = Array.from(new Set(requestedDates)).map(
+      (value) => new Date(value),
+    );
+
+    if (normalizedDates.some((value) => Number.isNaN(value.getTime()))) {
+      return c.json({ message: "One or more dates are invalid" }, 400);
+    }
+
+    if (normalizedDates.length > 366) {
+      return c.json({ message: "A maximum of 366 dates is allowed" }, 400);
     }
 
     // ✅ prepare update data
@@ -1433,7 +1547,7 @@ export const updateMultipleAttendanceStatus = async (c: Context) => {
       updateData.punchOut = new Date(punchOut);
     }
 
-    if (status === "Absent") {
+    if (["Absent", "WeeklyOff", "Holiday"].includes(status)) {
       updateData.punchIn = null;
       updateData.punchOut = null;
       updateData.totalWorkedMinutes = 0;
@@ -1456,27 +1570,27 @@ export const updateMultipleAttendanceStatus = async (c: Context) => {
     const userMap = new Map(users.map((u) => [u._id.toString(), u.uniqueId]));
 
     const operations = userIds
-      .map((uid: string) => {
+      .flatMap((uid: string) => {
         const uniqueId = userMap.get(uid);
-        if (uniqueId === undefined) return null;
+        if (uniqueId === undefined) return [];
 
-        return {
+        return normalizedDates.map((attendanceDate) => ({
           updateOne: {
             filter: {
               userId: uid,
-              date: new Date(date),
+              date: attendanceDate,
             },
             update: {
               $set: updateData,
               $setOnInsert: {
                 userId: uid,
-                date: new Date(date),
+                date: attendanceDate,
                 uniqueId: Number(uniqueId),
               },
             },
             upsert: true,
           },
-        };
+        }));
       })
       .filter(Boolean) as any[];
 
@@ -1489,6 +1603,9 @@ export const updateMultipleAttendanceStatus = async (c: Context) => {
     return c.json({
       success: true,
       message: "Status updated successfully",
+      usersProcessed: users.length,
+      datesProcessed: normalizedDates.length,
+      recordsProcessed: operations.length,
       modifiedCount: result.modifiedCount,
       upsertedCount: result.upsertedCount,
     });
@@ -1891,6 +2008,13 @@ export const getTodayAttendanceSummary = async (c: Context) => {
 
     const leaveSet = new Set(leaveData.map((l) => l.userId.toString()));
 
+    const holidayDateKeys = await getHolidayDateKeys(start, end);
+    const isHolidayOnlyRange = !rangeContainsWorkingDay(
+      start,
+      end,
+      holidayDateKeys,
+    );
+
     // ===== FINAL COUNT =====
     let present = 0;
     let absent = 0;
@@ -1922,6 +2046,8 @@ export const getTodayAttendanceSummary = async (c: Context) => {
         } else {
           notMarked++;
         }
+      } else if (isHolidayOnlyRange) {
+        // Calendar holidays and Sundays are not absences.
       } else if (leaveSet.has(uid)) {
         onLeave++;
       } else {
@@ -2032,6 +2158,13 @@ export const getMonthlyAttendanceMatrix = async (c: Context) => {
       }
     });
 
+    const holidayDateKeys = await getHolidayDateKeys(startDate, endDate);
+    const holidayDays = new Set<number>();
+    for (let day = 1; day <= totalDaysInMonth; day++) {
+      const date = new Date(yearNum, monthNum - 1, day, 12, 0, 0, 0);
+      if (isHolidayDate(date, holidayDateKeys)) holidayDays.add(day);
+    }
+
     // Construct matrix for each user
     const result = users.map((u: any, idx: number) => {
       const uid = u._id.toString();
@@ -2052,9 +2185,11 @@ export const getMonthlyAttendanceMatrix = async (c: Context) => {
       for (let day = 1; day <= totalDaysInMonth; day++) {
         const att = attMap.get(day);
         const onLeave = leaveDays.has(day);
+        const isHoliday = holidayDays.has(day);
 
         let dayStatus = "--";
         if (att) {
+          // A saved attendance record always takes priority over calendar fallback.
           dayStatus = att.status || (att.punchIn ? "Present" : "Absent");
           if (dayStatus === "Present") presentCount++;
           else if (dayStatus === "Absent") absentCount++;
@@ -2062,6 +2197,8 @@ export const getMonthlyAttendanceMatrix = async (c: Context) => {
 
           totalOtHours += att.overtimeHours || 0;
           totalWorkedMinutes += att.totalWorkedMinutes || 0;
+        } else if (isHoliday) {
+          dayStatus = "Holiday";
         } else if (onLeave) {
           dayStatus = "On Leave";
           leaveCount++;

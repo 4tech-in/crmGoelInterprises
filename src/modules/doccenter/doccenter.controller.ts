@@ -24,6 +24,7 @@ const REMOVED_ELECTRICITY_FIELDS = [
   "oldReadingKvah",
   "newReadingKvah",
   "kwhKvahDiff",
+  "powerFactor",
 ];
 
 const REMOVED_WATER_FIELDS = [
