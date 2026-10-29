@@ -15,7 +15,8 @@
   "scripts": {
     "start": "bun --preload ./patch-v8.js run src/server.ts",
     "dev": "bun --preload ./patch-v8.js --watch src/server.ts",
-    "create:admin": "bun --preload ./patch-v8.js run src/scripts/createAdmin.ts"
+    "create:admin": "bun --preload ./patch-v8.js run src/scripts/createAdmin.ts",
+    "backfill:manual-overtime": "bun --preload ./patch-v8.js src/scripts/backfillManualAttendanceOvertime.ts"
   },
   "peerDependencies": {
     "typescript": "^5"

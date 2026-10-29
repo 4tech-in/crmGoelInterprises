@@ -7,7 +7,10 @@ import * as XLSX from "xlsx";
 
 const calculateFuelAverage = async (vehicleId: any, currentOdometer: number, totalFuel: number, currentEntryId?: string) => {
   try {
-    const query: any = { vehicleId };
+    const query: any = {
+      vehicleId,
+      odometer: { $lt: currentOdometer },
+    };
     if (currentEntryId) {
       query._id = { $ne: currentEntryId };
     }
@@ -15,7 +18,7 @@ const calculateFuelAverage = async (vehicleId: any, currentOdometer: number, tot
     const prevEntry = await Fuel.findOne(query)
       .sort({ odometer: -1 });
       
-    if (prevEntry && prevEntry.odometer < currentOdometer) {
+    if (prevEntry) {
       const distance = currentOdometer - prevEntry.odometer;
       if (totalFuel > 0) {
         return parseFloat((distance / totalFuel).toFixed(2));

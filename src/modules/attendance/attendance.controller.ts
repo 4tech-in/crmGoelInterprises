@@ -7,6 +7,7 @@ import type { JwtPayload } from "../auth/auth.type";
 import { Types } from "mongoose";
 import Leave from "../leaveManagement/leave.model";
 import e from "express";
+import { calculateAttendanceMetrics } from "./attendanceCalculation";
 
 const toDateKey = (date: Date) =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -1749,7 +1750,7 @@ export const manualMarkAttendance = async (c: Context) => {
     }
 
     // ===== CHECK USER EXISTS =====
-    const user = await User.findById(userId);
+    const user: any = await User.findById(userId).populate("attendancePolicyId");
 
     if (!user) {
       return c.json({ message: "User not found" }, 404);
@@ -1768,17 +1769,47 @@ export const manualMarkAttendance = async (c: Context) => {
       return c.json({ message: "Invalid status" }, 400);
     }
 
-    let totalWorkedMinutes = 0;
+    const attendanceDate = new Date(date);
+    const punchInDate = punchIn ? new Date(punchIn) : null;
+    const punchOutDate = punchOut ? new Date(punchOut) : null;
 
-    if (punchIn && punchOut) {
-      totalWorkedMinutes =
-        (new Date(punchOut).getTime() - new Date(punchIn).getTime()) / 60000;
+    let totalWorkedMinutes = 0;
+    let overtimeHours = 0;
+    let overtimePay = 0;
+
+    if (punchInDate && punchOutDate) {
+      const policy =
+        user.attendancePolicyId ||
+        (await AttendancePolicy.findOne().sort({ createdAt: -1 }));
+
+      if (!policy) {
+        return c.json({ message: "No active attendance policy found" }, 400);
+      }
+
+      const holidayDateKeys = await getHolidayDateKeys(
+        attendanceDate,
+        attendanceDate,
+      );
+      const metrics = calculateAttendanceMetrics({
+        attendanceDate,
+        punchIn: punchInDate,
+        punchOut: punchOutDate,
+        policy,
+        isHoliday:
+          status === "Holiday" ||
+          status === "WeeklyOff" ||
+          isHolidayDate(attendanceDate, holidayDateKeys),
+      });
+
+      totalWorkedMinutes = metrics.totalWorkedMinutes;
+      overtimeHours = metrics.overtimeHours;
+      overtimePay = metrics.overtimePay;
     }
 
     // ===== FIND EXISTING =====
     const existingAttendance = await Attendance.findOne({
       userId,
-      date: new Date(date),
+      date: attendanceDate,
     });
 
     let attendance;
@@ -1786,11 +1817,11 @@ export const manualMarkAttendance = async (c: Context) => {
     if (existingAttendance) {
       // UPDATE ONLY
       existingAttendance.status = status;
-      existingAttendance.punchIn = punchIn ? new Date(punchIn) : null;
-      existingAttendance.punchOut = punchOut ? new Date(punchOut) : null;
+      existingAttendance.punchIn = punchInDate;
+      existingAttendance.punchOut = punchOutDate;
       existingAttendance.totalWorkedMinutes = totalWorkedMinutes;
-      existingAttendance.overtimeHours = 0;
-      existingAttendance.overtimePay = 0;
+      existingAttendance.overtimeHours = overtimeHours;
+      existingAttendance.overtimePay = overtimePay;
       existingAttendance.isManual = true;
 
       attendance = await existingAttendance.save();
@@ -1799,13 +1830,13 @@ export const manualMarkAttendance = async (c: Context) => {
       attendance = await Attendance.create({
         userId,
         uniqueId: Number(user.uniqueId),
-        date: new Date(date),
+        date: attendanceDate,
         status,
-        punchIn: punchIn ? new Date(punchIn) : null,
-        punchOut: punchOut ? new Date(punchOut) : null,
+        punchIn: punchInDate,
+        punchOut: punchOutDate,
         totalWorkedMinutes,
-        overtimeHours: 0,
-        overtimePay: 0,
+        overtimeHours,
+        overtimePay,
         isManual: true,
       });
     }
