@@ -2,6 +2,7 @@ import mongoose, { Schema, Document } from "mongoose";
 
 export interface IFuelCard extends Document {
   amount: number;
+  date: Date;
   note?: string;
   createdBy: mongoose.Types.ObjectId;
   createdAt: Date;
@@ -14,6 +15,11 @@ const FuelCardSchema: Schema = new Schema(
       type: Number, 
       required: true,
       default: 0
+    },
+    date: {
+      type: Date,
+      required: true,
+      default: Date.now,
     },
     note: {
       type: String
