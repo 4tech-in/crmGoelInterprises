@@ -719,6 +719,24 @@ const computePayrollDetails = ({
   const grossEarnings = grossPay + overtimePay;
   const netPay = Math.max(0, grossEarnings - totalDeductions);
 
+  // ── Basic Salary (configured policy salary before any proration) ──
+  const basicSalary = salary.monthlySalary || salary.hourlyRate || salary.dailyRate || 0;
+
+  // ── Half Day Salary (earnings attributable to half-day attendance) ──
+  // For monthly: each day worth = basicSalary / totalWorkingDays, half-day = 0.5 × that
+  // For daily:   0.5 × dailyRate × halfDays
+  // For hourly:  already included in basePay (hours worked × rate), no separate line needed
+  let halfDaySalary = 0;
+  if (halfDays > 0) {
+    if (salary.monthly) {
+      const perDayRate = totalWorkingDays > 0 ? (salary.monthlySalary || 0) / totalWorkingDays : 0;
+      halfDaySalary = round(perDayRate * 0.5 * halfDays);
+    } else if (salary.daily) {
+      halfDaySalary = round((salary.dailyRate || 0) * 0.5 * halfDays);
+    }
+    // For hourly, actual hours are already in basePay — no separate half-day line
+  }
+
   return {
     employeeId,
     employeeName,
@@ -734,6 +752,8 @@ const computePayrollDetails = ({
     mobileNo: user.mobileNo || undefined,
     salaryType,
     rate: round(rate),
+    basicSalary: round(basicSalary),
+    halfDaySalary: round(halfDaySalary),
     totalCalendarDays: round(calendarDays.length),
     totalWorkingDays: round(totalWorkingDays),
     holidaysCount: round(holidays.length),
