@@ -6,6 +6,7 @@ import mongoose from "mongoose";
 import { Types } from "mongoose";
 import { CalendarDay } from "../attendance/companyCalendar.model";
 import { User } from "../user/user.model";
+import { EmployeeId } from "../user/employeeId.model";
 import Company from "../company/company.model";
 
 
@@ -97,15 +98,43 @@ export const getEmployeeSalaries = async (c: Context) => {
     if (salaryType === "monthly") filter.monthly = true;
     if (salaryType === "daily") filter.daily = true;
 
-    // ===== SEARCH BY USER NAME / EMAIL =====
-    if (search) {
-      const users = await User.find({
-        $or: [
-          { name: { $regex: search, $options: "i" } },
-          { email: { $regex: search, $options: "i" } },
-        ],
-      }).select("_id");
+    // ===== COMPREHENSIVE SEARCH (NAME, OTHER NAME, UNIQUE ID, EMPLOYEE CODE, EMAIL, MOBILE, DEPARTMENT) =====
+    if (search && search.trim()) {
+      const trimmedSearch = search.trim();
+      const userOrConditions: any[] = [
+        { name: { $regex: trimmedSearch, $options: "i" } },
+        { otherName: { $regex: trimmedSearch, $options: "i" } },
+        { email: { $regex: trimmedSearch, $options: "i" } },
+        { mobileNo: { $regex: trimmedSearch, $options: "i" } },
+        { department: { $regex: trimmedSearch, $options: "i" } },
+      ];
 
+      const numericSearch = Number(trimmedSearch);
+      if (!isNaN(numericSearch)) {
+        userOrConditions.push({ uniqueId: numericSearch });
+      }
+
+      // Check EmployeeId collection for matching employee code
+      try {
+        const matchingEmpIds = await EmployeeId.find({
+          $or: [
+            { employeeId: { $regex: trimmedSearch, $options: "i" } },
+            { prefix: { $regex: trimmedSearch, $options: "i" } },
+          ],
+        }).select("_id");
+
+        if (matchingEmpIds.length > 0) {
+          userOrConditions.push({
+            employeeObjId: { $in: matchingEmpIds.map((e) => e._id) },
+          });
+        }
+      } catch (e) {
+        console.error("EmployeeId search error:", e);
+      }
+
+      userOrConditions.push({ employeeId: { $regex: trimmedSearch, $options: "i" } });
+
+      const users = await User.find({ $or: userOrConditions }).select("_id");
       const userIds = users.map((u) => u._id);
 
       filter.userId = { $in: userIds };
@@ -113,7 +142,11 @@ export const getEmployeeSalaries = async (c: Context) => {
 
     // ===== GET DATA =====
     const data = await EmployeeSalary.find(filter)
-      .populate("userId", "name email otherName department uniqueId")
+      .populate({
+        path: "userId",
+        select: "name email otherName department uniqueId employeeObjId",
+        populate: { path: "employeeObjId", select: "employeeId prefix" },
+      })
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limitNum);
@@ -533,7 +566,10 @@ const computePayrollDetails = ({
   const round = (num: number) => Number((num || 0).toFixed(2));
   const employeeId = user._id;
   const employeeName = user.otherName || user.name || "Unknown";
-  const employeeCode = user.employeeId || "";
+  const employeeCode =
+    (user.employeeObjId as any)?.employeeId ||
+    user.employeeId ||
+    (user.uniqueId ? String(user.uniqueId) : "");
   const payrollPolicy = user?.payrollPolicyId;
 
   const toDateStr = (date: Date | string) => {
@@ -664,11 +700,13 @@ const computePayrollDetails = ({
       }
     }
 
+    const paidHolidaysCount = holidays.length;
     const workedDaysCount = presentDays + halfDays * 0.5;
-    totalPaidDays = workedDaysCount + paidSundaysCount;
+    const totalMonthDays = calendarDays.length > 0 ? calendarDays.length : 30;
+    totalPaidDays = Math.min(totalMonthDays, workedDaysCount + paidSundaysCount + paidHolidaysCount);
 
-    // Gross Pay proportional to worked days
-    const workedRatio = totalWorkingDays === 0 ? 0 : totalPaidDays / totalWorkingDays;
+    // Gross Pay proportional to total calendar days of the month (capped at full monthly salary)
+    const workedRatio = totalMonthDays === 0 ? 0 : Math.min(1, totalPaidDays / totalMonthDays);
     grossPay = (salary.monthlySalary || 0) * workedRatio;
 
     // Payroll Policy breakdown
@@ -722,10 +760,6 @@ const computePayrollDetails = ({
   // ── Basic Salary (configured policy salary before any proration) ──
   const basicSalary = salary.monthlySalary || salary.hourlyRate || salary.dailyRate || 0;
 
-  // ── Half Day Salary (earnings attributable to half-day attendance) ──
-  // For monthly: each day worth = basicSalary / totalWorkingDays, half-day = 0.5 × that
-  // For daily:   0.5 × dailyRate × halfDays
-  // For hourly:  already included in basePay (hours worked × rate), no separate line needed
   let halfDaySalary = 0;
   if (halfDays > 0) {
     if (salary.monthly) {
@@ -800,8 +834,9 @@ export const calculateEmployeePayroll = async (c: Context) => {
       userId: employeeObjectId,
     }).populate({
       path: "userId",
-      select: "name email otherName employeeId companyId payrollPolicyId designation department doj aadharNo pfNo esiNo mobileNo",
+      select: "name email otherName employeeObjId uniqueId employeeId companyId payrollPolicyId designation department doj aadharNo pfNo esiNo mobileNo",
       populate: [
+        { path: "employeeObjId", select: "employeeId prefix" },
         { path: "payrollPolicyId" },
         { path: "companyId", select: "name" },
       ],
@@ -869,8 +904,9 @@ export const calculateAllEmployeesPayroll = async (c: Context) => {
       .populate({
         path: "userId",
         match: Object.keys(userMatch).length > 0 ? userMatch : undefined,
-        select: "name email otherName employeeId companyId payrollPolicyId designation department doj aadharNo pfNo esiNo mobileNo",
+        select: "name email otherName employeeObjId uniqueId employeeId companyId payrollPolicyId designation department doj aadharNo pfNo esiNo mobileNo",
         populate: [
+          { path: "employeeObjId", select: "employeeId prefix" },
           { path: "payrollPolicyId" },
           { path: "companyId", select: "name" },
         ],
