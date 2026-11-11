@@ -7,8 +7,11 @@ import {
   getEmployeeSalaries, 
   updateEmployeeSalary 
 } from "./employeeSalary.Controller";
+import { verifyToken } from "../../middleware/auth.middleware";
 
 const employeeSalaryRoutes = new Hono();
+
+employeeSalaryRoutes.use("*", verifyToken);
 
 employeeSalaryRoutes.post("/add", addEmployeeSalary);
 employeeSalaryRoutes.get("/get", getEmployeeSalaries);

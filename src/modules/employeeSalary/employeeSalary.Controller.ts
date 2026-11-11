@@ -8,6 +8,7 @@ import { CalendarDay } from "../attendance/companyCalendar.model";
 import { User } from "../user/user.model";
 import { EmployeeId } from "../user/employeeId.model";
 import Company from "../company/company.model";
+import { calculateSundayPayments } from "./sundayPaymentPolicy";
 
 
 //  add employee salary
@@ -528,22 +529,26 @@ export const deleteEmployeeSalary = async (c: Context) => {
 
 // Helper to generate calendar days if not seeded in DB or check calendar
 const getMonthCalendarDays = async (startDate: Date, endDate: Date, year: number, monthNum: number) => {
-  let calendarDays = await CalendarDay.find({ date: { $gte: startDate, $lte: endDate } }).sort({ date: 1 });
-  if (calendarDays.length === 0) {
-    const daysInMonth = new Date(year, monthNum, 0).getDate();
-    const generated: any[] = [];
-    for (let d = 1; d <= daysInMonth; d++) {
-      const dt = new Date(Date.UTC(year, monthNum - 1, d));
-      const isSunday = dt.getUTCDay() === 0;
-      generated.push({
-        date: dt,
-        dayType: isSunday ? "holiday" : "working",
-        isCompanyHoliday: false,
-        isNationalHoliday: false,
-      });
-    }
-    calendarDays = generated;
+  const savedCalendarDays = await CalendarDay.find({ date: { $gte: startDate, $lte: endDate } }).sort({ date: 1 });
+  const savedByDate = new Map(
+    savedCalendarDays.map((day) => [new Date(day.date).toISOString().slice(0, 10), day]),
+  );
+  const daysInMonth = new Date(Date.UTC(year, monthNum, 0)).getUTCDate();
+  const calendarDays: any[] = [];
+
+  // Always return a complete month. A partially seeded company calendar must
+  // not make payroll treat one saved holiday as the entire payroll month.
+  for (let dayOfMonth = 1; dayOfMonth <= daysInMonth; dayOfMonth += 1) {
+    const date = new Date(Date.UTC(year, monthNum - 1, dayOfMonth));
+    const savedDay = savedByDate.get(date.toISOString().slice(0, 10));
+    calendarDays.push(savedDay || {
+      date,
+      dayType: date.getUTCDay() === 0 ? "holiday" : "working",
+      isCompanyHoliday: false,
+      isNationalHoliday: false,
+    });
   }
+
   return calendarDays;
 };
 
@@ -552,6 +557,7 @@ const computePayrollDetails = ({
   salary,
   user,
   attendanceRecords,
+  sundayPolicyAttendanceRecords,
   calendarDays,
   startDate,
   endDate,
@@ -559,6 +565,7 @@ const computePayrollDetails = ({
   salary: any;
   user: any;
   attendanceRecords: any[];
+  sundayPolicyAttendanceRecords: any[];
   calendarDays: any[];
   startDate: Date;
   endDate: Date;
@@ -578,12 +585,10 @@ const computePayrollDetails = ({
   };
 
   // Calendar breakdown
-  const holidays = calendarDays.filter(
-    (d) =>
-      d.isCompanyHoliday ||
-      d.isNationalHoliday ||
-      (d.dayType === "holiday" && new Date(d.date).getUTCDay() !== 0)
-  );
+  const holidays = calendarDays.filter((d) => {
+    const isSunday = new Date(d.date).getUTCDay() === 0;
+    return !isSunday && (d.isCompanyHoliday || d.isNationalHoliday || d.dayType === "holiday");
+  });
 
   const weeklyOffDays = calendarDays.filter(
     (d) => new Date(d.date).getUTCDay() === 0 || d.dayType === "weekly_off"
@@ -619,6 +624,17 @@ const computePayrollDetails = ({
     }
   });
 
+  const attendanceCreditByDate = new Map<string, number>();
+  for (const record of attendanceRecords) {
+    const credit = record.status === "Present" || (!record.status && record.punchIn && record.punchOut)
+      ? 1
+      : record.status === "Half-Day"
+        ? 0.5
+        : 0;
+    const key = toDateStr(record.date);
+    attendanceCreditByDate.set(key, Math.max(attendanceCreditByDate.get(key) || 0, credit));
+  }
+
   let basePay = 0;
   let totalPaidDays = 0;
   let paidSundaysCount = 0;
@@ -645,65 +661,29 @@ const computePayrollDetails = ({
     salaryType = "monthly";
     rate = salary.monthlySalary || 0;
 
-    // Split month into weekly periods for Sunday weekly off policy
-    const weeks: any[] = [];
-    let current = new Date(startDate);
-    while (current <= endDate) {
-      const weekStart = new Date(current);
-      const weekEnd = new Date(current);
-      weekEnd.setDate(weekEnd.getDate() + 6);
-      weeks.push({ start: new Date(weekStart), end: weekEnd > endDate ? endDate : weekEnd });
-      current.setDate(current.getDate() + 7);
-    }
+    const sundayPaymentDecisions = calculateSundayPayments({
+      attendanceRecords: sundayPolicyAttendanceRecords,
+      periodStart: startDate,
+      periodEnd: endDate,
+      policyActive: payrollPolicy?.sundayPolicyActive !== false,
+    });
+    paidSundaysCount = sundayPaymentDecisions.filter((decision) => decision.paid).length;
 
-    let lastWeekWasFiveDays = false;
-    for (const week of weeks) {
-      const weekCalendarDays = calendarDays.filter(
-        (d) => new Date(d.date) >= week.start && new Date(d.date) <= week.end
+    // Add only the unpaid portion of a paid off-day. This prevents a present
+    // or half-day attendance record on a holiday/Sunday from being counted twice.
+    const paidSundayCredit = sundayPaymentDecisions
+      .filter((decision) => decision.paid)
+      .reduce(
+        (total, decision) => total + Math.max(0, 1 - (attendanceCreditByDate.get(toDateStr(decision.sunday)) || 0)),
+        0,
       );
-
-      let daysWorkedInWeek = 0;
-      for (const day of weekCalendarDays) {
-        const dayStr = toDateStr(day.date);
-        const record = attendanceRecords.find((r) => toDateStr(r.date) === dayStr);
-        if (!record) continue;
-
-        if (record.status === "Present" || (!record.status && record.punchIn && record.punchOut)) {
-          daysWorkedInWeek += 1;
-        } else if (record.status === "Half-Day") {
-          daysWorkedInWeek += 0.5;
-        }
-      }
-
-      // Sunday policy calculation: 6 working days in week grants paid Sunday; 5 days can alternate
-      let isSundayPaid = false;
-      if (payrollPolicy?.sundayPolicyActive !== false) {
-        if (daysWorkedInWeek >= 6) {
-          isSundayPaid = true;
-          lastWeekWasFiveDays = false;
-        } else if (daysWorkedInWeek >= 5) {
-          if (!lastWeekWasFiveDays) {
-            isSundayPaid = true;
-            lastWeekWasFiveDays = true;
-          } else {
-            isSundayPaid = false;
-            lastWeekWasFiveDays = false;
-          }
-        } else {
-          isSundayPaid = false;
-          lastWeekWasFiveDays = false;
-        }
-      }
-
-      if (isSundayPaid) {
-        paidSundaysCount += 1;
-      }
-    }
-
-    const paidHolidaysCount = holidays.length;
+    const paidHolidayCredit = holidays.reduce(
+      (total, holiday) => total + Math.max(0, 1 - (attendanceCreditByDate.get(toDateStr(holiday.date)) || 0)),
+      0,
+    );
     const workedDaysCount = presentDays + halfDays * 0.5;
     const totalMonthDays = calendarDays.length > 0 ? calendarDays.length : 30;
-    totalPaidDays = Math.min(totalMonthDays, workedDaysCount + paidSundaysCount + paidHolidaysCount);
+    totalPaidDays = Math.min(totalMonthDays, workedDaysCount + paidSundayCredit + paidHolidayCredit);
 
     // Gross Pay proportional to total calendar days of the month (capped at full monthly salary)
     const workedRatio = totalMonthDays === 0 ? 0 : Math.min(1, totalPaidDays / totalMonthDays);
@@ -849,15 +829,19 @@ export const calculateEmployeePayroll = async (c: Context) => {
 
     const calendarDays = await getMonthCalendarDays(startDate, endDate, year, monthNum);
 
-    const attendanceRecords = await Attendance.find({
+    const sundayPolicyAttendanceRecords = await Attendance.find({
       userId: employeeObjectId,
-      date: { $gte: startDate, $lte: endDate },
+      date: { $lte: endDate },
     });
+    const attendanceRecords = sundayPolicyAttendanceRecords.filter(
+      (record) => record.date >= startDate && record.date <= endDate,
+    );
 
     const result = computePayrollDetails({
       salary,
       user,
       attendanceRecords,
+      sundayPolicyAttendanceRecords,
       calendarDays,
       startDate,
       endDate,
@@ -914,6 +898,19 @@ export const calculateAllEmployeesPayroll = async (c: Context) => {
 
     const validSalaries = salaries.filter((s: any) => s.userId);
 
+    const employeeIds = validSalaries.map((salary: any) => salary.userId._id);
+    const allAttendanceRecords = await Attendance.find({
+      userId: { $in: employeeIds },
+      date: { $lte: endDate },
+    });
+    const attendanceByEmployee = new Map<string, any[]>();
+    for (const record of allAttendanceRecords) {
+      const employeeKey = record.userId.toString();
+      const employeeAttendance = attendanceByEmployee.get(employeeKey) || [];
+      employeeAttendance.push(record);
+      attendanceByEmployee.set(employeeKey, employeeAttendance);
+    }
+
     const round = (num: number) => Number((num || 0).toFixed(2));
     const results: any[] = [];
     let grandTotalNetPay = 0;
@@ -925,15 +922,16 @@ export const calculateAllEmployeesPayroll = async (c: Context) => {
       const user: any = salary.userId;
       const employeeId = user._id;
 
-      const attendanceRecords = await Attendance.find({
-        userId: employeeId,
-        date: { $gte: startDate, $lte: endDate },
-      });
+      const sundayPolicyAttendanceRecords = attendanceByEmployee.get(employeeId.toString()) || [];
+      const attendanceRecords = sundayPolicyAttendanceRecords.filter(
+        (record) => record.date >= startDate && record.date <= endDate,
+      );
 
       const itemResult = computePayrollDetails({
         salary,
         user,
         attendanceRecords,
+        sundayPolicyAttendanceRecords,
         calendarDays,
         startDate,
         endDate,

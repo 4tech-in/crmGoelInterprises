@@ -5,6 +5,15 @@ import fs from "fs";
 import mongoose from "mongoose";
 import * as XLSX from "xlsx";
 
+const parseFuelDate = (value: string) => {
+  // Date-only values represent a business calendar date, not an instant in a
+  // user's timezone. Store them consistently at UTC midnight.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return new Date(`${value}T00:00:00.000Z`);
+  }
+  return new Date(value);
+};
+
 const calculateFuelAverage = async (vehicleId: any, currentOdometer: number, totalFuel: number, currentEntryId?: string) => {
   try {
     const query: any = {
@@ -54,7 +63,7 @@ export const createFuelEntry = async (c: Context) => {
         fuelData.totalFuel = Number(formData.get("totalFuel"));
       }
       if (formData.has("fillingDate")) {
-        fuelData.fillingDate = new Date(formData.get("fillingDate") as string);
+        fuelData.fillingDate = parseFuelDate(formData.get("fillingDate") as string);
       }
 
       // Handle images
@@ -303,7 +312,7 @@ export const updateFuelEntry = async (c: Context) => {
       if (formData.has("ratePerLtr")) updateData.ratePerLtr = Number(formData.get("ratePerLtr"));
       if (formData.has("totalAmount")) updateData.totalAmount = Number(formData.get("totalAmount"));
       if (formData.has("totalFuel")) updateData.totalFuel = Number(formData.get("totalFuel"));
-      if (formData.has("fillingDate")) updateData.fillingDate = new Date(formData.get("fillingDate") as string);
+      if (formData.has("fillingDate")) updateData.fillingDate = parseFuelDate(formData.get("fillingDate") as string);
 
       // Handle image updates
       const files = formData.getAll("images");
