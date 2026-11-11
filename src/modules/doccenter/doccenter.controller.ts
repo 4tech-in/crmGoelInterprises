@@ -4,6 +4,7 @@ import path from "path";
 import fs from "fs";
 
 const REMOVED_ELECTRICITY_FIELDS = [
+  "unitPriceBasic",
   "consumptionCharges",
   "fppca",
   "edRate",
@@ -58,6 +59,21 @@ const removedFieldsFor = (documentType: string) => {
 const sanitizeMetadata = (metadata: Record<string, any>, documentType: string) => {
   const sanitized = { ...metadata };
   removedFieldsFor(documentType).forEach((key) => delete sanitized[key]);
+
+  if (documentType.toLowerCase() === "electricity") {
+    const totalAmount = Number.parseFloat(String(sanitized.totalAmount ?? ""));
+    const unitKwh = Number.parseFloat(String(sanitized.unitKwh ?? ""));
+    const unitKvah = Number.parseFloat(String(sanitized.unitKvah ?? ""));
+    const billedUnits = Math.max(
+      Number.isFinite(unitKwh) ? unitKwh : 0,
+      Number.isFinite(unitKvah) ? unitKvah : 0,
+    );
+
+    sanitized.paidUnitRate = Number.isFinite(totalAmount) && totalAmount > 0 && billedUnits > 0
+      ? (totalAmount / billedUnits).toFixed(2)
+      : "";
+  }
+
   return sanitized;
 };
 
@@ -119,7 +135,7 @@ export const uploadDocument = async (c: Context) => {
       documentType: documentType || "Other",
       createdBy: user.id,
       files: uploadedFilePaths,
-      metadata,
+      metadata: sanitizeMetadata(metadata, documentType || "Other"),
     });
 
     await newDoc.save();
